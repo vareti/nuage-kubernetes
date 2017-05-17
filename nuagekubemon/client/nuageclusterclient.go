@@ -52,8 +52,9 @@ func NewNuageOsClient(nkmConfig *config.NuageKubeMonConfig) *NuageClusterClient 
 
 func (nosc *NuageClusterClient) GetClusterClientCallBacks() *api.ClusterClientCallBacks {
 	return &api.ClusterClientCallBacks{
-		FilterPods: nosc.GetPods,
-		GetPod:     nosc.GetPod,
+		FilterPods:       nosc.GetPods,
+		FilterNamespaces: nosc.GetNamespaces,
+		GetPod:           nosc.GetPod,
 	}
 }
 
