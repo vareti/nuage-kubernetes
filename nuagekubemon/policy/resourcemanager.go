@@ -54,10 +54,13 @@ type PgMap map[string]api.PgInfo
 //map of policy name to policy group map
 type PolicyPgMap map[string]PgMap
 
+//map of namespace to all policy groups in a namespace
+type PolicyNsPgMap map[string]PolicyPgMap
+
 type VsdMetaData map[string]string
 
 type ResourceManager struct {
-	policyPgMap            PolicyPgMap
+	policyNsPgMap          PolicyNsPgMap
 	callBacks              CallBacks
 	clusterClientCallBacks api.ClusterClientCallBacks
 	vsdMeta                VsdMetaData
@@ -76,7 +79,7 @@ func NewResourceManager(callBacks *CallBacks, clusterCbs *api.ClusterClientCallB
 }
 
 func (rm *ResourceManager) Init(callBacks *CallBacks, clusterCbs *api.ClusterClientCallBacks, vsdMeta *VsdMetaData) error {
-	rm.policyPgMap = make(PolicyPgMap)
+	rm.policyNsPgMap = make(PolicyNsPgMap)
 	rm.callBacks = *callBacks
 	rm.clusterClientCallBacks = *clusterCbs
 	rm.vsdMeta = *vsdMeta
@@ -117,7 +120,7 @@ func (rm *ResourceManager) GetPolicyGroupsForPod(podName string, podNs string) (
 	if pod, err := rm.clusterClientCallBacks.GetPod(podName, podNs); err == nil {
 		rm.lock.Lock()
 		defer rm.lock.Unlock()
-		for _, pgMap := range rm.policyPgMap {
+		for _, pgMap := range rm.policyNsPgMap[podNs] {
 			for _, pgInfo := range pgMap {
 				if selector, err := unversioned.LabelSelectorAsSelector(&pgInfo.Selector); err == nil {
 					if selector.Matches(labels.Set(pod.Labels)) {
@@ -244,22 +247,25 @@ func (rm *ResourceManager) HandlePolicyEvent(pe *api.NetworkPolicyEvent) error {
 		return fmt.Errorf("Unable to initialize policy implementer %+v", err)
 	}
 
+	if _, ok := rm.policyNsPgMap[pe.Namespace]; !ok {
+		rm.policyNsPgMap[pe.Namespace] = make(PolicyPgMap)
+	}
 	switch pe.Type {
 	case api.Added:
-		if _, ok := rm.policyPgMap[pe.Name]; !ok {
-			rm.policyPgMap[pe.Name] = make(PgMap)
+		if _, ok := rm.policyNsPgMap[pe.Namespace][pe.Name]; !ok {
+			rm.policyNsPgMap[pe.Namespace][pe.Name] = make(PgMap)
 		}
 		podTargetSelector, err := unversioned.LabelSelectorAsSelector(&pe.Policy.PodSelector)
 		if err == nil {
 			targetSelectorStr := podTargetSelector.String()
-			if _, found := rm.policyPgMap[pe.Name][targetSelectorStr]; !found {
+			if _, found := rm.policyNsPgMap[pe.Namespace][pe.Name][targetSelectorStr]; !found {
 				name := "PG Target For " + pe.Name
 				pgName, pgId, err := rm.callBacks.AddPg(name, targetSelectorStr)
 				if err == nil {
-					rm.policyPgMap[pe.Name][targetSelectorStr] = api.PgInfo{PgName: pgName, PgId: pgId, Selector: pe.Policy.PodSelector}
+					rm.policyNsPgMap[pe.Namespace][pe.Name][targetSelectorStr] = api.PgInfo{PgName: pgName, PgId: pgId, Selector: pe.Policy.PodSelector}
 					//get pods for this selector and add them to pg.
 					var podList []string
-					if pods, err := rm.clusterClientCallBacks.FilterPods(&kapi.ListOptions{LabelSelector: podTargetSelector, FieldSelector: fields.Everything()}, ""); err == nil {
+					if pods, err := rm.clusterClientCallBacks.FilterPods(&kapi.ListOptions{LabelSelector: podTargetSelector, FieldSelector: fields.Everything()}, pe.Namespace); err == nil {
 						for _, pod := range *pods {
 							podList = append(podList, pod.Name)
 						}
@@ -267,7 +273,7 @@ func (rm *ResourceManager) HandlePolicyEvent(pe *api.NetworkPolicyEvent) error {
 							glog.Errorf("Couldn't add ports %s to policy group %s", podList, pgId)
 						}
 					} else {
-						glog.Error("Couldn't retrieve pods from the cluster client")
+						glog.Errorf("Couldn't retrieve pods from the cluster client %s", err)
 					}
 
 				} else {
@@ -277,22 +283,42 @@ func (rm *ResourceManager) HandlePolicyEvent(pe *api.NetworkPolicyEvent) error {
 				glog.Infof("Policy group for targetSelectorStr %s exists already", targetSelectorStr)
 			}
 		}
+		namespaceLookup := make(map[string]bool)
+		namespaces, err := rm.clusterClientCallBacks.FilterNamespaces(&kapi.ListOptions{})
+		if err != nil {
+			glog.Errorf("Couldn't retrieve namespaces list because of error: %s", err)
+			return err
+		}
+		for _, ingressRule := range pe.Policy.Ingress {
+			for _, from := range ingressRule.From {
+				if from.FieldSelector != nil {
+					for _, ns := range *namespaces {
+						for _, uid := range from.FieldSelector.MatchLabels {
+							if ns.UID == uid {
+								namespaceLookup[ns.Name] = true
+							}
+						}
+					}
+				}
+			}
+		}
 		for i, ingressRule := range pe.Policy.Ingress {
 			for f, from := range ingressRule.From {
 				if from.PodSelector != nil {
-					sourceSelector, err := unversioned.LabelSelectorAsSelector(from.PodSelector)
+					sourcePodSelector, err := unversioned.LabelSelectorAsSelector(from.PodSelector)
 					if err == nil {
-						sourceSelectorStr := sourceSelector.String()
-						if _, found := rm.policyPgMap[pe.Name][sourceSelectorStr]; !found {
+						sourceSelectorStr := sourcePodSelector.String()
+						if _, found := rm.policyNsPgMap[pe.Namespace][pe.Name][sourceSelectorStr]; !found {
 							name := "PG Source " + strconv.Itoa(i) + "-" + strconv.Itoa(f) + " For " + pe.Name
 							pgName, pgId, err := rm.callBacks.AddPg(name, sourceSelectorStr)
 							if err == nil {
-								rm.policyPgMap[pe.Name][sourceSelectorStr] = api.PgInfo{PgName: pgName, PgId: pgId, Selector: *from.PodSelector}
-								//get pods for this selector and add them to pg.
+								rm.policyNsPgMap[pe.Namespace][pe.Name][sourceSelectorStr] = api.PgInfo{PgName: pgName, PgId: pgId, Selector: *from.PodSelector}
 								var podList []string
-								if pods, err := rm.clusterClientCallBacks.FilterPods(&kapi.ListOptions{LabelSelector: sourceSelector, FieldSelector: fields.Everything()}, ""); err == nil {
+								if pods, err := rm.clusterClientCallBacks.FilterPods(&kapi.ListOptions{LabelSelector: sourcePodSelector, FieldSelector: fields.Everything()}, ""); err == nil {
 									for _, pod := range *pods {
-										podList = append(podList, pod.Name)
+										if _, ok := namespaceLookup[pod.Namespace]; ok {
+											podList = append(podList, pod.Name)
+										}
 									}
 									if err = rm.callBacks.AddPortsToPg(pgId, podList); err != nil {
 										glog.Errorf("Couldn't add ports %s to policy group %s", podList, pgId)
@@ -312,7 +338,7 @@ func (rm *ResourceManager) HandlePolicyEvent(pe *api.NetworkPolicyEvent) error {
 				}
 			}
 		}
-		if nuagePolicy, err := translator.CreateNuagePGPolicy(pe, rm.policyPgMap[pe.Name], rm.vsdMeta); err == nil {
+		if nuagePolicy, err := translator.CreateNuagePGPolicy(pe, rm.policyNsPgMap[pe.Namespace][pe.Name], rm.vsdMeta); err == nil {
 			if notImplemented := rm.implementer.ImplementPolicy(nuagePolicy); notImplemented != nil {
 				glog.Errorf("Got a %s error when implementing policy", notImplemented)
 			}
@@ -322,14 +348,14 @@ func (rm *ResourceManager) HandlePolicyEvent(pe *api.NetworkPolicyEvent) error {
 		}
 	case api.Deleted:
 		glog.Infof("Starting deletion of policy %+v", pe.Name)
-		if _, ok := rm.policyPgMap[pe.Name]; !ok {
+		if _, ok := rm.policyNsPgMap[pe.Namespace][pe.Name]; !ok {
 			glog.Info("No policy group map entry found for this policy")
 			return errors.New("No policy group map entry found")
 		} else {
 			podTargetSelector, err := unversioned.LabelSelectorAsSelector(&pe.Policy.PodSelector)
 			if err == nil {
 				targetSelectorStr := podTargetSelector.String()
-				if pgInfo, found := rm.policyPgMap[pe.Name][targetSelectorStr]; !found {
+				if pgInfo, found := rm.policyNsPgMap[pe.Namespace][pe.Name][targetSelectorStr]; !found {
 					glog.Errorf("Policy group for targetSelectorStr %s is not found", targetSelectorStr)
 				} else {
 					//first unassign pods from pg
@@ -339,7 +365,7 @@ func (rm *ResourceManager) HandlePolicyEvent(pe *api.NetworkPolicyEvent) error {
 						if err := rm.callBacks.DeletePg(pgInfo.PgId); err != nil {
 							glog.Errorf("Failed to delete policy group %s", pgInfo.PgId)
 						} else {
-							delete(rm.policyPgMap[pe.Name], targetSelectorStr)
+							delete(rm.policyNsPgMap[pe.Namespace][pe.Name], targetSelectorStr)
 						}
 					}
 				}
@@ -350,7 +376,7 @@ func (rm *ResourceManager) HandlePolicyEvent(pe *api.NetworkPolicyEvent) error {
 						sourceSelector, err := unversioned.LabelSelectorAsSelector(from.PodSelector)
 						if err == nil {
 							sourceSelectorStr := sourceSelector.String()
-							if pgInfo, found := rm.policyPgMap[pe.Name][sourceSelectorStr]; !found {
+							if pgInfo, found := rm.policyNsPgMap[pe.Namespace][pe.Name][sourceSelectorStr]; !found {
 								glog.Errorf("Policy group for sourceSelectorStr %s is not found", sourceSelectorStr)
 							} else {
 								//first unassign pods from pg
@@ -360,7 +386,7 @@ func (rm *ResourceManager) HandlePolicyEvent(pe *api.NetworkPolicyEvent) error {
 									if err := rm.callBacks.DeletePg(pgInfo.PgId); err != nil {
 										glog.Errorf("Failed to delete policy group %s", pgInfo.PgId)
 									} else {
-										delete(rm.policyPgMap[pe.Name], sourceSelectorStr)
+										delete(rm.policyNsPgMap[pe.Namespace][pe.Name], sourceSelectorStr)
 									}
 								}
 							}

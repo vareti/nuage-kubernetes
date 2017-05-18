@@ -1,17 +1,10 @@
 package api
 
 import (
-	"k8s.io/apimachinery/pkg/fields"
-	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/kubernetes/pkg/api"
 	"k8s.io/kubernetes/pkg/api/unversioned"
+	"k8s.io/kubernetes/pkg/util/intstr"
 )
-
-// GroupName is the group name use in this package
-const GroupName = "nuage.kubernetes.io"
-
-// SchemeGroupVersion is group version used to register these objects
-var SchemeGroupVersion = unversioned.GroupVersion{Group: GroupName, Version: "v1"}
 
 const NuageNetworkPolicyResourcePlural = "nuagenetworkpolicies"
 
@@ -39,7 +32,7 @@ type NuageNetworkPolicyPort struct {
 
 type NuageNetworkPolicyPeer struct {
 	PodSelector   *unversioned.LabelSelector `json:"podSelector,omitempty"`
-	FieldSelector *fields.Selector           `json:"fieldSelector,omitempty"`
+	FieldSelector *unversioned.LabelSelector `json:"fieldSelector,omitempty"`
 }
 
 type NuageNetworkPolicyList struct {
