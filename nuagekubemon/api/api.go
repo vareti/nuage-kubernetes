@@ -55,6 +55,7 @@ type Namespace string
 type NamespaceEvent struct {
 	Type        EventType
 	Name        string
+	UID         string
 	Annotations map[string]string `json:"annotations,omitempty"`
 }
 
@@ -88,8 +89,9 @@ type FilterServices func(*kapi.ListOptions) (*[]*ServiceEvent, error)
 type FilterNetworkPolicies func(*kapi.ListOptions) (*[]*NetworkPolicyEvent, error)
 
 type ClusterClientCallBacks struct {
-	FilterPods FilterPods
-	GetPod     GetPod
+	FilterPods       FilterPods
+	FilterNamespaces FilterNamespaces
+	GetPod           GetPod
 }
 
 type RESTError struct {

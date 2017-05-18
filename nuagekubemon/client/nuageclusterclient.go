@@ -24,7 +24,6 @@ import (
 	"github.com/nuagenetworks/nuage-kubernetes/nuagekubemon/api"
 	"github.com/nuagenetworks/nuage-kubernetes/nuagekubemon/config"
 	oscache "github.com/openshift/origin/pkg/client/cache"
-	apiv1 "k8s.io/client-go/pkg/api/v1"
 	kapi "k8s.io/kubernetes/pkg/api"
 	"k8s.io/kubernetes/pkg/apis/extensions"
 	"k8s.io/kubernetes/pkg/client/cache"
@@ -36,6 +35,7 @@ import (
 	"k8s.io/kubernetes/pkg/fields"
 	"k8s.io/kubernetes/pkg/labels"
 	"k8s.io/kubernetes/pkg/runtime"
+	"k8s.io/kubernetes/pkg/runtime/serializer"
 	"k8s.io/kubernetes/pkg/watch"
 	"net"
 	"net/http"
@@ -44,8 +44,9 @@ import (
 )
 
 type NuageClusterClient struct {
-	kubeConfig *krestclient.Config
-	kubeClient *kclient.Client
+	kubeConfig          *krestclient.Config
+	kubeClient          *kclient.Client
+	nuageResourceClient *krestclient.RESTClient
 }
 
 func NewNuageOsClient(nkmConfig *config.NuageKubeMonConfig) *NuageClusterClient {
@@ -79,7 +80,24 @@ func (nosc *NuageClusterClient) Init(nkmConfig *config.NuageKubeMonConfig) {
 	if err != nil {
 		glog.Infof("Got an error: %s while creating the kube client", err)
 	}
+	resourceClient, err := newNuageResouceClient(nosc.kubeConfig)
+	if err != nil {
+		glog.Errorf("Got an error: %s while creating nuage resource client", err)
+	}
 	nosc.kubeClient = kubeClient
+	nosc.nuageResourceClient = resourceClient
+
+	clientset, err := kclientset.NewForConfig(nosc.kubeConfig)
+	if err != nil {
+		glog.Errorf("Creating new clientset from kubeconfig failed with error: %v", err)
+		return
+	}
+
+	if err := createPolicyResource(clientset); err != nil {
+		glog.Errorf("Creating third party nuage network policy resource failed with error: %v", err)
+		return
+	}
+
 }
 
 func (nosc *NuageClusterClient) GetExistingEvents(nsChannel chan *api.NamespaceEvent, serviceChannel chan *api.ServiceEvent, podChannel chan *api.PodEvent, policyEventChannel chan *api.NetworkPolicyEvent) {
@@ -115,7 +133,7 @@ func (nosc *NuageClusterClient) GetExistingEvents(nsChannel chan *api.NamespaceE
 	if err != nil {
 		glog.Infof("Got an error: %s while getting network policies list from kube client", err)
 	}
-	for _, policy := range *policiesList {
+	for _, policy := range policiesList {
 		policyEventChannel <- policy
 	}
 }
@@ -142,7 +160,7 @@ func (nosc *NuageClusterClient) GetNamespaces(listOpts *kapi.ListOptions) (*[]*a
 	}
 	namespaceList := make([]*api.NamespaceEvent, 0)
 	for _, obj := range namespaces.Items {
-		namespaceList = append(namespaceList, &api.NamespaceEvent{Type: api.Added, Name: obj.ObjectMeta.Name, Annotations: obj.GetAnnotations()})
+		namespaceList = append(namespaceList, &api.NamespaceEvent{Type: api.Added, Name: obj.ObjectMeta.Name, UID: string(obj.ObjectMeta.UID), Annotations: obj.GetAnnotations()})
 	}
 	return &namespaceList, nil
 }
@@ -277,36 +295,26 @@ func (nosc *NuageClusterClient) WatchPods(receiver chan *api.PodEvent, stop chan
 	}
 }
 
-func (nosc *NuageClusterClient) GetNetworkPolicies(listOpts *kapi.ListOptions) (*[]*api.NetworkPolicyEvent, error) {
-	var policies api.NuageNetworkPolicyList
-	err := nosc.kubeClient.RESTClient.Get().Resource(api.NuageNetworkPolicyResourcePlural).Do().Into(&policies)
-	if err != nil {
-		return nil, err
-	}
+func (nosc *NuageClusterClient) GetNetworkPolicies(listOpts *kapi.ListOptions) ([]*api.NetworkPolicyEvent, error) {
 	policiesList := make([]*api.NetworkPolicyEvent, 0)
+	var policies api.NuageNetworkPolicyList
+	err := nosc.nuageResourceClient.Get().Resource(api.NuageNetworkPolicyResourcePlural).Do().Into(&policies)
+	if err != nil {
+		glog.Errorf("Fetching exisiting network policies failed with error: %v", err)
+		return policiesList, err
+	}
 	for _, policy := range policies.Items {
 		policiesList = append(policiesList, &api.NetworkPolicyEvent{Type: api.Added, Name: policy.Name, Namespace: policy.Namespace, Policy: policy.Spec, Labels: policy.Labels})
 
 	}
-	return &policiesList, nil
+	return policiesList, nil
 }
 
 func (nosc *NuageClusterClient) WatchNetworkPolicies(receiver chan *api.NetworkPolicyEvent, stop chan bool) error {
-	clientset, err := kclientset.NewForConfig(nosc.kubeConfig)
-	if err != nil {
-		glog.Errorf("Creating new clientset from kubeconfig failed with error: %v", err)
-		return err
-	}
-
-	if err := createPolicyResource(clientset); err != nil {
-		glog.Errorf("Creating third party nuage network policy resource failed with error: %v", err)
-		return err
-	}
-
 	source := cache.NewListWatchFromClient(
-		nosc.kubeClient.RESTClient,
+		nosc.nuageResourceClient,
 		api.NuageNetworkPolicyResourcePlural,
-		apiv1.NamespaceAll,
+		kapi.NamespaceAll,
 		fields.Everything())
 
 	_, controller := framework.NewInformer(
@@ -371,4 +379,24 @@ func createPolicyResource(clientset kclientset.Interface) error {
 	}
 	_, err := clientset.Extensions().ThirdPartyResources().Create(tpr)
 	return err
+}
+
+func newNuageResouceClient(cfg *krestclient.Config) (*krestclient.RESTClient, error) {
+	scheme := runtime.NewScheme()
+	if err := api.AddToScheme(scheme); err != nil {
+		return nil, err
+	}
+
+	config := *cfg
+	config.GroupVersion = &api.SchemeGroupVersion
+	config.APIPath = "/apis"
+	config.ContentType = runtime.ContentTypeJSON
+	config.NegotiatedSerializer = serializer.DirectCodecFactory{CodecFactory: serializer.NewCodecFactory(scheme)}
+
+	client, err := krestclient.RESTClientFor(&config)
+	if err != nil {
+		return nil, err
+	}
+
+	return client, nil
 }
