@@ -23,7 +23,6 @@ import (
 	"github.com/golang/glog"
 	kapi "k8s.io/kubernetes/pkg/api"
 	"k8s.io/kubernetes/pkg/api/unversioned"
-	"k8s.io/kubernetes/pkg/apis/extensions"
 )
 
 type PgInfo struct {
@@ -72,7 +71,7 @@ type NetworkPolicyEvent struct {
 	Type      EventType
 	Name      string
 	Namespace string
-	Policy    extensions.NetworkPolicySpec
+	Policy    NuageNetworkPolicySpec
 	Labels    map[string]string `json:"labels,omitempty"`
 }
 

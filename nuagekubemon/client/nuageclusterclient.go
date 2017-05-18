@@ -19,16 +19,20 @@
 package client
 
 import (
+	"context"
 	"github.com/golang/glog"
 	"github.com/nuagenetworks/nuage-kubernetes/nuagekubemon/api"
 	"github.com/nuagenetworks/nuage-kubernetes/nuagekubemon/config"
 	oscache "github.com/openshift/origin/pkg/client/cache"
+	apiv1 "k8s.io/client-go/pkg/api/v1"
 	kapi "k8s.io/kubernetes/pkg/api"
-	kextensions "k8s.io/kubernetes/pkg/apis/extensions"
+	"k8s.io/kubernetes/pkg/apis/extensions"
 	"k8s.io/kubernetes/pkg/client/cache"
+	kclientset "k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset"
 	krestclient "k8s.io/kubernetes/pkg/client/restclient"
 	kclient "k8s.io/kubernetes/pkg/client/unversioned"
 	"k8s.io/kubernetes/pkg/client/unversioned/clientcmd"
+	"k8s.io/kubernetes/pkg/controller/framework"
 	"k8s.io/kubernetes/pkg/fields"
 	"k8s.io/kubernetes/pkg/labels"
 	"k8s.io/kubernetes/pkg/runtime"
@@ -274,7 +278,8 @@ func (nosc *NuageClusterClient) WatchPods(receiver chan *api.PodEvent, stop chan
 }
 
 func (nosc *NuageClusterClient) GetNetworkPolicies(listOpts *kapi.ListOptions) (*[]*api.NetworkPolicyEvent, error) {
-	policies, err := nosc.kubeClient.NetworkPolicies(kapi.NamespaceAll).List(*listOpts)
+	var policies api.NuageNetworkPolicyList
+	err := nosc.kubeClient.RESTClient.Get().Resource(api.NuageNetworkPolicyResourcePlural).Do().Into(&policies)
 	if err != nil {
 		return nil, err
 	}
@@ -287,30 +292,41 @@ func (nosc *NuageClusterClient) GetNetworkPolicies(listOpts *kapi.ListOptions) (
 }
 
 func (nosc *NuageClusterClient) WatchNetworkPolicies(receiver chan *api.NetworkPolicyEvent, stop chan bool) error {
-	policyEventQueue := oscache.NewEventQueue(cache.MetaNamespaceKeyFunc)
-	listWatch := &cache.ListWatch{
-		ListFunc: func(rv kapi.ListOptions) (runtime.Object, error) {
-			return nosc.kubeClient.NetworkPolicies(kapi.NamespaceAll).List(kapi.ListOptions{LabelSelector: labels.Everything(), FieldSelector: fields.Everything()})
-		},
-		WatchFunc: func(rv kapi.ListOptions) (watch.Interface, error) {
-			return nosc.kubeClient.NetworkPolicies(kapi.NamespaceAll).Watch(kapi.ListOptions{LabelSelector: labels.Everything(), FieldSelector: fields.Everything()})
-		},
+	clientset, err := kclientset.NewForConfig(nosc.kubeConfig)
+	if err != nil {
+		glog.Errorf("Creating new clientset from kubeconfig failed with error: %v", err)
+		return err
 	}
-	cache.NewReflector(listWatch, &kextensions.NetworkPolicy{}, policyEventQueue, 0).Run()
-	for {
-		evt, obj, err := policyEventQueue.Pop()
-		if err != nil {
-			return err
-		}
-		eventType := watch.EventType(evt)
-		switch eventType {
-		case watch.Added:
-			fallthrough
-		case watch.Deleted:
-			policy := obj.(*kextensions.NetworkPolicy)
-			receiver <- &api.NetworkPolicyEvent{Type: api.EventType(eventType), Name: policy.Name, Namespace: policy.Namespace, Policy: policy.Spec, Labels: policy.Labels}
-		}
+
+	if err := createPolicyResource(clientset); err != nil {
+		glog.Errorf("Creating third party nuage network policy resource failed with error: %v", err)
+		return err
 	}
+
+	source := cache.NewListWatchFromClient(
+		nosc.kubeClient.RESTClient,
+		api.NuageNetworkPolicyResourcePlural,
+		apiv1.NamespaceAll,
+		fields.Everything())
+
+	_, controller := framework.NewInformer(
+		source,
+		&api.NuageNetworkPolicy{},
+		0,
+		framework.ResourceEventHandlerFuncs{
+			AddFunc: func(obj interface{}) {
+				policy := obj.(*api.NuageNetworkPolicy)
+				receiver <- &api.NetworkPolicyEvent{Type: api.Added, Name: policy.Name, Namespace: policy.Namespace, Policy: policy.Spec, Labels: policy.Labels}
+			},
+			DeleteFunc: func(obj interface{}) {
+				policy := obj.(*api.NuageNetworkPolicy)
+				receiver <- &api.NetworkPolicyEvent{Type: api.Deleted, Name: policy.Name, Namespace: policy.Namespace, Policy: policy.Spec, Labels: policy.Labels}
+			},
+		})
+	ctx, cancelFunc := context.WithCancel(context.Background())
+	defer cancelFunc()
+	controller.Run(ctx.Done())
+	return nil
 }
 
 // DefaultClientTransport sets defaults for a client Transport that are suitable
@@ -339,4 +355,20 @@ func GetNuageLabels(input *kapi.Service) map[string]string {
 		}
 	}
 	return nuageLabels
+}
+
+//CreatePolicyResource creates nuagenetworks network policy resource using k8s
+//thirdparty resources
+func createPolicyResource(clientset kclientset.Interface) error {
+	tpr := &extensions.ThirdPartyResource{
+		ObjectMeta: kapi.ObjectMeta{
+			Name: "nuage-network-policy." + api.GroupName,
+		},
+		Versions: []extensions.APIVersion{
+			{Name: api.SchemeGroupVersion.Version},
+		},
+		Description: "NuageNetowrks ThirdPartyResource Network Policy Object",
+	}
+	_, err := clientset.Extensions().ThirdPartyResources().Create(tpr)
+	return err
 }
