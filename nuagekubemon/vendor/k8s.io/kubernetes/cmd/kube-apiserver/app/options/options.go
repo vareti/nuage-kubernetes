@@ -18,72 +18,126 @@ limitations under the License.
 package options
 
 import (
+	"net"
 	"time"
 
+	utilnet "k8s.io/apimachinery/pkg/util/net"
+	genericoptions "k8s.io/apiserver/pkg/server/options"
+	"k8s.io/apiserver/pkg/storage/storagebackend"
+	"k8s.io/kubernetes/pkg/api"
 	"k8s.io/kubernetes/pkg/api/validation"
-	genericoptions "k8s.io/kubernetes/pkg/genericapiserver/options"
+	kubeapiserveradmission "k8s.io/kubernetes/pkg/kubeapiserver/admission"
+	kubeoptions "k8s.io/kubernetes/pkg/kubeapiserver/options"
 	kubeletclient "k8s.io/kubernetes/pkg/kubelet/client"
 	"k8s.io/kubernetes/pkg/master/ports"
-	"k8s.io/kubernetes/pkg/registry/generic/registry"
+
+	// add the kubernetes feature gates
+	_ "k8s.io/kubernetes/pkg/features"
 
 	"github.com/spf13/pflag"
 )
 
-// APIServer runs a kubernetes api server.
-type APIServer struct {
-	*genericoptions.ServerRunOptions
-	AllowPrivileged             bool
-	EventTTL                    time.Duration
-	KubeletConfig               kubeletclient.KubeletClientConfig
-	MaxConnectionBytesPerSec    int64
-	SSHKeyfile                  string
-	SSHUser                     string
-	ServiceAccountKeyFile       string
-	ServiceAccountLookup        bool
-	WebhookTokenAuthnConfigFile string
-	WebhookTokenAuthnCacheTTL   time.Duration
+// DefaultServiceNodePortRange is the default port range for NodePort services.
+var DefaultServiceNodePortRange = utilnet.PortRange{Base: 30000, Size: 2768}
+
+// ServerRunOptions runs a kubernetes api server.
+type ServerRunOptions struct {
+	GenericServerRunOptions *genericoptions.ServerRunOptions
+	Etcd                    *genericoptions.EtcdOptions
+	SecureServing           *genericoptions.SecureServingOptions
+	InsecureServing         *kubeoptions.InsecureServingOptions
+	Audit                   *genericoptions.AuditLogOptions
+	Features                *genericoptions.FeatureOptions
+	Admission               *genericoptions.AdmissionOptions
+	Authentication          *kubeoptions.BuiltInAuthenticationOptions
+	Authorization           *kubeoptions.BuiltInAuthorizationOptions
+	CloudProvider           *kubeoptions.CloudProviderOptions
+	StorageSerialization    *kubeoptions.StorageSerializationOptions
+	APIEnablement           *kubeoptions.APIEnablementOptions
+
+	AllowPrivileged           bool
+	EventTTL                  time.Duration
+	KubeletConfig             kubeletclient.KubeletClientConfig
+	KubernetesServiceNodePort int
+	MasterCount               int
+	MaxConnectionBytesPerSec  int64
+	ServiceClusterIPRange     net.IPNet // TODO: make this a list
+	ServiceNodePortRange      utilnet.PortRange
+	SSHKeyfile                string
+	SSHUser                   string
+
+	ProxyClientCertFile string
+	ProxyClientKeyFile  string
 }
 
-// NewAPIServer creates a new APIServer object with default parameters
-func NewAPIServer() *APIServer {
-	s := APIServer{
-		ServerRunOptions: genericoptions.NewServerRunOptions().WithEtcdOptions(),
-		EventTTL:         1 * time.Hour,
+// NewServerRunOptions creates a new ServerRunOptions object with default parameters
+func NewServerRunOptions() *ServerRunOptions {
+	s := ServerRunOptions{
+		GenericServerRunOptions: genericoptions.NewServerRunOptions(),
+		Etcd:                 genericoptions.NewEtcdOptions(storagebackend.NewDefaultConfig(kubeoptions.DefaultEtcdPathPrefix, api.Scheme, nil)),
+		SecureServing:        kubeoptions.NewSecureServingOptions(),
+		InsecureServing:      kubeoptions.NewInsecureServingOptions(),
+		Audit:                genericoptions.NewAuditLogOptions(),
+		Features:             genericoptions.NewFeatureOptions(),
+		Admission:            genericoptions.NewAdmissionOptions(&kubeapiserveradmission.Plugins),
+		Authentication:       kubeoptions.NewBuiltInAuthenticationOptions().WithAll(),
+		Authorization:        kubeoptions.NewBuiltInAuthorizationOptions(),
+		CloudProvider:        kubeoptions.NewCloudProviderOptions(),
+		StorageSerialization: kubeoptions.NewStorageSerializationOptions(),
+		APIEnablement:        kubeoptions.NewAPIEnablementOptions(),
+
+		EventTTL:    1 * time.Hour,
+		MasterCount: 1,
 		KubeletConfig: kubeletclient.KubeletClientConfig{
-			Port:        ports.KubeletPort,
+			Port:         ports.KubeletPort,
+			ReadOnlyPort: ports.KubeletReadOnlyPort,
+			PreferredAddressTypes: []string{
+				// --override-hostname
+				string(api.NodeHostName),
+
+				// internal, preferring DNS if reported
+				string(api.NodeInternalDNS),
+				string(api.NodeInternalIP),
+
+				// external, preferring DNS if reported
+				string(api.NodeExternalDNS),
+				string(api.NodeExternalIP),
+			},
 			EnableHttps: true,
 			HTTPTimeout: time.Duration(5) * time.Second,
 		},
-		WebhookTokenAuthnCacheTTL: 2 * time.Minute,
+		ServiceNodePortRange: DefaultServiceNodePortRange,
 	}
+	// Overwrite the default for storage data format.
+	s.Etcd.DefaultStorageMediaType = "application/vnd.kubernetes.protobuf"
+	// Set the default for admission plugins names
+	s.Admission.PluginNames = []string{"AlwaysAdmit"}
 	return &s
 }
 
 // AddFlags adds flags for a specific APIServer to the specified FlagSet
-func (s *APIServer) AddFlags(fs *pflag.FlagSet) {
+func (s *ServerRunOptions) AddFlags(fs *pflag.FlagSet) {
 	// Add the generic flags.
-	s.ServerRunOptions.AddUniversalFlags(fs)
-	//Add etcd specific flags.
-	s.ServerRunOptions.AddEtcdStorageFlags(fs)
+	s.GenericServerRunOptions.AddUniversalFlags(fs)
+	s.Etcd.AddFlags(fs)
+	s.SecureServing.AddFlags(fs)
+	s.SecureServing.AddDeprecatedFlags(fs)
+	s.InsecureServing.AddFlags(fs)
+	s.InsecureServing.AddDeprecatedFlags(fs)
+	s.Audit.AddFlags(fs)
+	s.Features.AddFlags(fs)
+	s.Authentication.AddFlags(fs)
+	s.Authorization.AddFlags(fs)
+	s.CloudProvider.AddFlags(fs)
+	s.StorageSerialization.AddFlags(fs)
+	s.APIEnablement.AddFlags(fs)
+	s.Admission.AddFlags(fs)
+
 	// Note: the weird ""+ in below lines seems to be the only way to get gofmt to
 	// arrange these text blocks sensibly. Grrr.
 
 	fs.DurationVar(&s.EventTTL, "event-ttl", s.EventTTL,
-		"Amount of time to retain events. Default is 1h.")
-
-	fs.StringVar(&s.ServiceAccountKeyFile, "service-account-key-file", s.ServiceAccountKeyFile, ""+
-		"File containing PEM-encoded x509 RSA private or public key, used to verify "+
-		"ServiceAccount tokens. If unspecified, --tls-private-key-file is used.")
-
-	fs.BoolVar(&s.ServiceAccountLookup, "service-account-lookup", s.ServiceAccountLookup,
-		"If true, validate ServiceAccount tokens exist in etcd as part of authentication.")
-
-	fs.StringVar(&s.WebhookTokenAuthnConfigFile, "authentication-token-webhook-config-file", s.WebhookTokenAuthnConfigFile, ""+
-		"File with webhook configuration for token authentication in kubeconfig format. "+
-		"The API server will query the remote service to determine authentication for bearer tokens.")
-
-	fs.DurationVar(&s.WebhookTokenAuthnCacheTTL, "authentication-token-webhook-cache-ttl", s.WebhookTokenAuthnCacheTTL,
-		"The duration to cache responses from the webhook token authenticator. Default is 2m.")
+		"Amount of time to retain events.")
 
 	fs.BoolVar(&s.AllowPrivileged, "allow-privileged", s.AllowPrivileged,
 		"If true, allow privileged containers.")
@@ -98,13 +152,43 @@ func (s *APIServer) AddFlags(fs *pflag.FlagSet) {
 		"If non-zero, throttle each user connection to this number of bytes/sec. "+
 		"Currently only applies to long-running requests.")
 
+	fs.IntVar(&s.MasterCount, "apiserver-count", s.MasterCount,
+		"The number of apiservers running in the cluster, must be a positive number.")
+
+	// See #14282 for details on how to test/try this option out.
+	// TODO: remove this comment once this option is tested in CI.
+	fs.IntVar(&s.KubernetesServiceNodePort, "kubernetes-service-node-port", s.KubernetesServiceNodePort, ""+
+		"If non-zero, the Kubernetes master service (which apiserver creates/maintains) will be "+
+		"of type NodePort, using this as the value of the port. If zero, the Kubernetes master "+
+		"service will be of type ClusterIP.")
+
+	fs.IPNetVar(&s.ServiceClusterIPRange, "service-cluster-ip-range", s.ServiceClusterIPRange, ""+
+		"A CIDR notation IP range from which to assign service cluster IPs. This must not "+
+		"overlap with any IP ranges assigned to nodes for pods.")
+
+	fs.IPNetVar(&s.ServiceClusterIPRange, "portal-net", s.ServiceClusterIPRange,
+		"DEPRECATED: see --service-cluster-ip-range instead.")
+	fs.MarkDeprecated("portal-net", "see --service-cluster-ip-range instead")
+
+	fs.Var(&s.ServiceNodePortRange, "service-node-port-range", ""+
+		"A port range to reserve for services with NodePort visibility. "+
+		"Example: '30000-32767'. Inclusive at both ends of the range.")
+	fs.Var(&s.ServiceNodePortRange, "service-node-ports", "DEPRECATED: see --service-node-port-range instead")
+	fs.MarkDeprecated("service-node-ports", "see --service-node-port-range instead")
+
 	// Kubelet related flags:
 	fs.BoolVar(&s.KubeletConfig.EnableHttps, "kubelet-https", s.KubeletConfig.EnableHttps,
 		"Use https for kubelet connections.")
 
+	fs.StringSliceVar(&s.KubeletConfig.PreferredAddressTypes, "kubelet-preferred-address-types", s.KubeletConfig.PreferredAddressTypes,
+		"List of the preferred NodeAddressTypes to use for kubelet connections.")
+
 	fs.UintVar(&s.KubeletConfig.Port, "kubelet-port", s.KubeletConfig.Port,
 		"DEPRECATED: kubelet port.")
 	fs.MarkDeprecated("kubelet-port", "kubelet-port is deprecated and will be removed.")
+
+	fs.UintVar(&s.KubeletConfig.ReadOnlyPort, "kubelet-read-only-port", s.KubeletConfig.ReadOnlyPort,
+		"DEPRECATED: kubelet port.")
 
 	fs.DurationVar(&s.KubeletConfig.HTTPTimeout, "kubelet-timeout", s.KubeletConfig.HTTPTimeout,
 		"Timeout for kubelet operations.")
@@ -124,7 +208,9 @@ func (s *APIServer) AddFlags(fs *pflag.FlagSet) {
 		"e.g., setting empty UID in update request to its existing value. This flag can be turned off "+
 		"after we fix all the clients that send malformed updates.")
 
-	fs.BoolVar(&registry.EnableGarbageCollector, "enable-garbage-collector", false, ""+
-		"Enables the generic garbage collector. MUST be synced with the corresponding flag "+
-		"of the kube-controller-manager.")
+	fs.StringVar(&s.ProxyClientCertFile, "proxy-client-cert-file", s.ProxyClientCertFile,
+		"client certificate used to prove the identity of the aggragator or kube-apiserver when it proxies requests to a user api-server")
+	fs.StringVar(&s.ProxyClientKeyFile, "proxy-client-key-file", s.ProxyClientKeyFile,
+		"client certificate key used to prove the identity of the aggragator or kube-apiserver when it proxies requests to a user api-server")
+
 }

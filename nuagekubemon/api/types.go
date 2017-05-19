@@ -1,21 +1,21 @@
 package api
 
 import (
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/kubernetes/pkg/api"
-	"k8s.io/kubernetes/pkg/api/unversioned"
-	"k8s.io/kubernetes/pkg/util/intstr"
 )
 
 const NuageNetworkPolicyResourcePlural = "nuagenetworkpolicies"
 
 type NuageNetworkPolicy struct {
-	unversioned.TypeMeta `json:",inline"`
-	api.ObjectMeta       `json:"metadata"`
-	Spec                 NuageNetworkPolicySpec `json:"spec"`
+	metav1.TypeMeta   `json:",inline"`
+	metav1.ObjectMeta `json:"metadata"`
+	Spec              NuageNetworkPolicySpec `json:"spec"`
 }
 
 type NuageNetworkPolicySpec struct {
-	PodSelector unversioned.LabelSelector       `json:"podSelector"`
+	PodSelector metav1.LabelSelector            `json:"podSelector"`
 	Ingress     []NuageNetworkPolicyIngressRule `json:"ingress"`
 }
 
@@ -25,19 +25,18 @@ type NuageNetworkPolicyIngressRule struct {
 }
 
 type NuageNetworkPolicyPort struct {
-	Protocol *api.Protocol `json:"protocol,omitempty"`
-
-	Port intstr.IntOrString `json:"port,omitempty"`
+	Protocol *api.Protocol      `json:"protocol,omitempty"`
+	Port     intstr.IntOrString `json:"port,omitempty"`
 }
 
 type NuageNetworkPolicyPeer struct {
-	PodSelector   *unversioned.LabelSelector `json:"podSelector,omitempty"`
-	FieldSelector *unversioned.LabelSelector `json:"fieldSelector,omitempty"`
+	PodSelector   *metav1.LabelSelector `json:"podSelector,omitempty"`
+	FieldSelector *metav1.LabelSelector `json:"fieldSelector,omitempty"`
 }
 
 type NuageNetworkPolicyList struct {
-	unversioned.TypeMeta `json:",inline"`
-	unversioned.ListMeta `json:"metadata,omitempty"`
+	metav1.TypeMeta `json:",inline"`
+	metav1.ListMeta `json:"metadata,omitempty"`
 
 	Items []NuageNetworkPolicy `json:"items"`
 }

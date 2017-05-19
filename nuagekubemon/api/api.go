@@ -20,15 +20,13 @@ package api
 
 import (
 	"fmt"
-	"github.com/golang/glog"
-	kapi "k8s.io/kubernetes/pkg/api"
-	"k8s.io/kubernetes/pkg/api/unversioned"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 type PgInfo struct {
 	PgName   string
 	PgId     string
-	Selector unversioned.LabelSelector
+	Selector metav1.LabelSelector
 }
 
 type EventType string
@@ -84,10 +82,10 @@ type PodEvent struct {
 }
 
 type GetPod func(string, string) (*PodEvent, error)
-type FilterPods func(*kapi.ListOptions, string) (*[]*PodEvent, error)
-type FilterNamespaces func(*kapi.ListOptions) (*[]*NamespaceEvent, error)
-type FilterServices func(*kapi.ListOptions) (*[]*ServiceEvent, error)
-type FilterNetworkPolicies func(*kapi.ListOptions) (*[]*NetworkPolicyEvent, error)
+type FilterPods func(*metav1.ListOptions, string) (*[]*PodEvent, error)
+type FilterNamespaces func(*metav1.ListOptions) (*[]*NamespaceEvent, error)
+type FilterServices func(*metav1.ListOptions) (*[]*ServiceEvent, error)
+type FilterNetworkPolicies func(*metav1.ListOptions) (*[]*NetworkPolicyEvent, error)
 
 type ClusterClientCallBacks struct {
 	FilterPods       FilterPods
@@ -247,53 +245,33 @@ func (acl *VsdAclEntry) TryNextAclPriority() {
 
 func (lhs *VsdAclEntry) IsEqual(rhs *VsdAclEntry) bool {
 	if lhs.DSCP != "" && lhs.DSCP != rhs.DSCP {
-		glog.Info("DSCP for 2 ACLs dont match")
-		glog.Infof("LHS: %s, RHS: %s", lhs.DSCP, rhs.DSCP)
 		return false
 	}
 	if lhs.Action != "" && lhs.Action != rhs.Action {
-		glog.Info("Action for 2 ACLs dont match")
-		glog.Infof("LHS: %s, RHS: %s", lhs.Action, rhs.Action)
 		return false
 	}
 	if lhs.EntityScope != "" && lhs.EntityScope != rhs.EntityScope {
-		glog.Info("Entity Scope for 2 ACLs dont match")
-		glog.Infof("LHS: %s, RHS: %s", lhs.EntityScope, rhs.EntityScope)
 		return false
 	}
 	if lhs.EtherType != "" && lhs.EtherType != rhs.EtherType {
-		glog.Info("Ether Type for 2 ACLs dont match")
-		glog.Infof("LHS: %s, RHS: %s", lhs.EtherType, rhs.EtherType)
 		return false
 	}
 	if lhs.LocationID != "" && lhs.LocationID != rhs.LocationID {
-		glog.Info("Location ID for 2 ACLs dont match")
-		glog.Infof("LHS: %s, RHS: %s", lhs.LocationID, rhs.LocationID)
 		return false
 	}
 	if lhs.LocationType != "" && lhs.LocationType != rhs.LocationType {
-		glog.Info("Location Type for 2 ACLs dont match")
-		glog.Infof("LHS: %s, RHS: %s", lhs.LocationType, rhs.LocationType)
 		return false
 	}
 	if lhs.NetworkID != "" && lhs.NetworkID != rhs.NetworkID {
-		glog.Info("Network ID for 2 ACLs dont match")
-		glog.Infof("LHS: %s, RHS: %s", lhs.NetworkID, rhs.NetworkID)
 		return false
 	}
 	if lhs.NetworkType != "" && lhs.NetworkType != rhs.NetworkType {
-		glog.Info("Network Type for 2 ACLs dont match")
-		glog.Infof("LHS: %s, RHS: %s", lhs.NetworkType, rhs.NetworkType)
 		return false
 	}
 	if lhs.PolicyState != "" && lhs.PolicyState != rhs.PolicyState {
-		glog.Info("Policy State for 2 ACLs dont match")
-		glog.Infof("LHS: %s, RHS: %s", lhs.PolicyState, rhs.PolicyState)
 		return false
 	}
 	if lhs.Protocol != "" && lhs.Protocol != rhs.Protocol {
-		glog.Info("Protocol for 2 ACLs dont match")
-		glog.Infof("LHS: %s, RHS: %s", lhs.Protocol, rhs.Protocol)
 		return false
 	}
 	return true

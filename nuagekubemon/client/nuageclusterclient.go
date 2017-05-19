@@ -23,20 +23,18 @@ import (
 	"github.com/golang/glog"
 	"github.com/nuagenetworks/nuage-kubernetes/nuagekubemon/api"
 	"github.com/nuagenetworks/nuage-kubernetes/nuagekubemon/config"
-	oscache "github.com/openshift/origin/pkg/client/cache"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/fields"
+	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/serializer"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/pkg/api/v1"
+	"k8s.io/client-go/pkg/apis/extensions/v1beta1"
+	krestclient "k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/cache"
+	"k8s.io/client-go/tools/clientcmd"
 	kapi "k8s.io/kubernetes/pkg/api"
-	"k8s.io/kubernetes/pkg/apis/extensions"
-	"k8s.io/kubernetes/pkg/client/cache"
-	kclientset "k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset"
-	krestclient "k8s.io/kubernetes/pkg/client/restclient"
-	kclient "k8s.io/kubernetes/pkg/client/unversioned"
-	"k8s.io/kubernetes/pkg/client/unversioned/clientcmd"
-	"k8s.io/kubernetes/pkg/controller/framework"
-	"k8s.io/kubernetes/pkg/fields"
-	"k8s.io/kubernetes/pkg/labels"
-	"k8s.io/kubernetes/pkg/runtime"
-	"k8s.io/kubernetes/pkg/runtime/serializer"
-	"k8s.io/kubernetes/pkg/watch"
 	"net"
 	"net/http"
 	"strings"
@@ -45,7 +43,7 @@ import (
 
 type NuageClusterClient struct {
 	kubeConfig          *krestclient.Config
-	kubeClient          *kclient.Client
+	clientset           *kubernetes.Clientset
 	nuageResourceClient *krestclient.RESTClient
 }
 
@@ -57,8 +55,9 @@ func NewNuageOsClient(nkmConfig *config.NuageKubeMonConfig) *NuageClusterClient 
 
 func (nosc *NuageClusterClient) GetClusterClientCallBacks() *api.ClusterClientCallBacks {
 	return &api.ClusterClientCallBacks{
-		FilterPods: nosc.GetPods,
-		GetPod:     nosc.GetPod,
+		FilterPods:       nosc.GetPods,
+		FilterNamespaces: nosc.GetNamespaces,
+		GetPod:           nosc.GetPod,
 	}
 }
 
@@ -76,22 +75,21 @@ func (nosc *NuageClusterClient) Init(nkmConfig *config.NuageKubeMonConfig) {
 	kubeConfig.Burst = 200
 	kubeConfig.WrapTransport = DefaultClientTransport
 	nosc.kubeConfig = kubeConfig
-	kubeClient, err := kclient.New(nosc.kubeConfig)
-	if err != nil {
-		glog.Infof("Got an error: %s while creating the kube client", err)
-	}
-	resourceClient, err := newNuageResouceClient(nosc.kubeConfig)
-	if err != nil {
-		glog.Errorf("Got an error: %s while creating nuage resource client", err)
-	}
-	nosc.kubeClient = kubeClient
-	nosc.nuageResourceClient = resourceClient
-
-	clientset, err := kclientset.NewForConfig(nosc.kubeConfig)
+	//contain clients to various api groups including rest client
+	clientset, err := kubernetes.NewForConfig(nosc.kubeConfig)
 	if err != nil {
 		glog.Errorf("Creating new clientset from kubeconfig failed with error: %v", err)
 		return
 	}
+
+	//this client is for the new third party resource that we are going to define
+	resourceClient, err := newNuageResouceClient(nosc.kubeConfig)
+	if err != nil {
+		glog.Errorf("Got an error: %s while creating nuage resource client", err)
+	}
+
+	nosc.clientset = clientset
+	nosc.nuageResourceClient = resourceClient
 
 	if err := createPolicyResource(clientset); err != nil {
 		glog.Errorf("Creating third party nuage network policy resource failed with error: %v", err)
@@ -102,7 +100,7 @@ func (nosc *NuageClusterClient) Init(nkmConfig *config.NuageKubeMonConfig) {
 
 func (nosc *NuageClusterClient) GetExistingEvents(nsChannel chan *api.NamespaceEvent, serviceChannel chan *api.ServiceEvent, podChannel chan *api.PodEvent, policyEventChannel chan *api.NetworkPolicyEvent) {
 	//we will use the kube client APIs than interfacing with the REST API
-	listOpts := kapi.ListOptions{LabelSelector: labels.Everything(), FieldSelector: fields.Everything()}
+	listOpts := metav1.ListOptions{LabelSelector: labels.Everything().String(), FieldSelector: fields.Everything().String()}
 	nsList, err := nosc.GetNamespaces(&listOpts)
 	if err != nil {
 		glog.Infof("Got an error: %s while getting namespaces list from kube client", err)
@@ -153,8 +151,8 @@ func (nosc *NuageClusterClient) RunServiceWatcher(serviceChannel chan *api.Servi
 	nosc.WatchServices(serviceChannel, stop)
 }
 
-func (nosc *NuageClusterClient) GetNamespaces(listOpts *kapi.ListOptions) (*[]*api.NamespaceEvent, error) {
-	namespaces, err := nosc.kubeClient.Namespaces().List(*listOpts)
+func (nosc *NuageClusterClient) GetNamespaces(listOpts *metav1.ListOptions) (*[]*api.NamespaceEvent, error) {
+	namespaces, err := nosc.clientset.CoreV1().Namespaces().List(*listOpts)
 	if err != nil {
 		return nil, err
 	}
@@ -166,38 +164,38 @@ func (nosc *NuageClusterClient) GetNamespaces(listOpts *kapi.ListOptions) (*[]*a
 }
 
 func (nosc *NuageClusterClient) WatchNamespaces(receiver chan *api.NamespaceEvent, stop chan bool) error {
-	nsEventQueue := oscache.NewEventQueue(cache.MetaNamespaceKeyFunc)
-	listWatch := &cache.ListWatch{
-		ListFunc: func(options kapi.ListOptions) (runtime.Object, error) {
-			return nosc.kubeClient.Namespaces().List(options)
-		},
-		WatchFunc: func(options kapi.ListOptions) (watch.Interface, error) {
-			return nosc.kubeClient.Namespaces().Watch(options)
-		},
-	}
-	cache.NewReflector(listWatch, &kapi.Namespace{}, nsEventQueue, 0).Run()
-	for {
-		evt, obj, err := nsEventQueue.Pop()
-		if err != nil {
-			return err
-		}
+	source := cache.NewListWatchFromClient(
+		nosc.clientset.CoreV1().RESTClient(),
+		"namespaces",
+		v1.NamespaceAll,
+		fields.Everything())
 
-		eventType := watch.EventType(evt)
-		ns := obj.(*kapi.Namespace)
-
-		switch eventType {
-		case watch.Added:
-			receiver <- &api.NamespaceEvent{Type: api.Added, Name: ns.ObjectMeta.Name, Annotations: ns.GetAnnotations()}
-		case watch.Modified:
-			receiver <- &api.NamespaceEvent{Type: api.Modified, Name: ns.ObjectMeta.Name, Annotations: ns.GetAnnotations()}
-		case watch.Deleted:
-			receiver <- &api.NamespaceEvent{Type: api.Deleted, Name: ns.ObjectMeta.Name, Annotations: ns.GetAnnotations()}
-		}
-	}
+	_, controller := cache.NewInformer(
+		source,
+		&v1.Namespace{},
+		0,
+		cache.ResourceEventHandlerFuncs{
+			AddFunc: func(obj interface{}) {
+				ns := obj.(*v1.Namespace)
+				receiver <- &api.NamespaceEvent{Type: api.Added, Name: ns.ObjectMeta.Name, Annotations: ns.GetAnnotations()}
+			},
+			UpdateFunc: func(oldobj, newobj interface{}) {
+				ns := newobj.(*v1.Namespace)
+				receiver <- &api.NamespaceEvent{Type: api.Modified, Name: ns.ObjectMeta.Name, Annotations: ns.GetAnnotations()}
+			},
+			DeleteFunc: func(obj interface{}) {
+				ns := obj.(*v1.Namespace)
+				receiver <- &api.NamespaceEvent{Type: api.Deleted, Name: ns.ObjectMeta.Name, Annotations: ns.GetAnnotations()}
+			},
+		})
+	ctx, cancelFunc := context.WithCancel(context.Background())
+	defer cancelFunc()
+	controller.Run(ctx.Done())
+	return nil
 }
 
-func (nosc *NuageClusterClient) GetServices(listOpts *kapi.ListOptions) (*[]*api.ServiceEvent, error) {
-	services, err := nosc.kubeClient.Services(kapi.NamespaceAll).List(*listOpts)
+func (nosc *NuageClusterClient) GetServices(listOpts *metav1.ListOptions) (*[]*api.ServiceEvent, error) {
+	services, err := nosc.clientset.CoreV1().Services(kapi.NamespaceAll).List(*listOpts)
 	if err != nil {
 		return nil, err
 	}
@@ -212,51 +210,54 @@ func (nosc *NuageClusterClient) GetServices(listOpts *kapi.ListOptions) (*[]*api
 }
 
 func (nosc *NuageClusterClient) WatchServices(receiver chan *api.ServiceEvent, stop chan bool) error {
-	serviceEventQueue := oscache.NewEventQueue(cache.MetaNamespaceKeyFunc)
-	listWatch := &cache.ListWatch{
-		ListFunc: func(rv kapi.ListOptions) (runtime.Object, error) {
-			return nosc.kubeClient.Services(kapi.NamespaceAll).List(kapi.ListOptions{LabelSelector: labels.Everything(), FieldSelector: fields.Everything()})
-		},
-		WatchFunc: func(rv kapi.ListOptions) (watch.Interface, error) {
-			return nosc.kubeClient.Services(kapi.NamespaceAll).Watch(kapi.ListOptions{LabelSelector: labels.Everything(), FieldSelector: fields.Everything()})
-		},
-	}
-	cache.NewReflector(listWatch, &kapi.Service{}, serviceEventQueue, 0).Run()
-	for {
-		evt, obj, err := serviceEventQueue.Pop()
-		if err != nil {
-			return err
-		}
-		eventType := watch.EventType(evt)
-		switch eventType {
-		case watch.Added:
-			fallthrough
-		case watch.Deleted:
-			service := obj.(*kapi.Service)
-			labels := GetNuageLabels(service)
-			if label, exists := labels["private-service"]; !exists || strings.ToLower(label) == "false" {
-				receiver <- &api.ServiceEvent{Type: api.EventType(eventType), Name: service.ObjectMeta.Name, ClusterIP: service.Spec.ClusterIP, Namespace: service.ObjectMeta.Namespace, NuageLabels: labels}
-			}
-		}
-	}
+	source := cache.NewListWatchFromClient(
+		nosc.clientset.CoreV1().RESTClient(),
+		"services",
+		v1.NamespaceAll,
+		fields.Everything())
+
+	_, controller := cache.NewInformer(
+		source,
+		&v1.Service{},
+		0,
+		cache.ResourceEventHandlerFuncs{
+			AddFunc: func(obj interface{}) {
+				service := obj.(*v1.Service)
+				labels := GetNuageLabels(service)
+				if label, exists := labels["private-service"]; !exists || strings.ToLower(label) == "false" {
+					receiver <- &api.ServiceEvent{Type: api.Added, Name: service.ObjectMeta.Name, ClusterIP: service.Spec.ClusterIP, Namespace: service.ObjectMeta.Namespace, NuageLabels: labels}
+				}
+			},
+			DeleteFunc: func(obj interface{}) {
+				service := obj.(*v1.Service)
+				labels := GetNuageLabels(service)
+				if label, exists := labels["private-service"]; !exists || strings.ToLower(label) == "false" {
+					receiver <- &api.ServiceEvent{Type: api.Deleted, Name: service.ObjectMeta.Name, ClusterIP: service.Spec.ClusterIP, Namespace: service.ObjectMeta.Namespace, NuageLabels: labels}
+				}
+			},
+		})
+	ctx, cancelFunc := context.WithCancel(context.Background())
+	defer cancelFunc()
+	controller.Run(ctx.Done())
+	return nil
 }
 
 func (nosc *NuageClusterClient) GetPod(name string, ns string) (*api.PodEvent, error) {
 	if ns == "" {
 		ns = kapi.NamespaceAll
 	}
-	pod, err := nosc.kubeClient.Pods(ns).Get(name)
+	pod, err := nosc.clientset.CoreV1().Pods(ns).Get(name, metav1.GetOptions{})
 	if err != nil {
 		return nil, err
 	}
 	return &api.PodEvent{Type: api.Added, Name: pod.Name, Namespace: pod.Namespace, Labels: pod.Labels}, nil
 }
 
-func (nosc *NuageClusterClient) GetPods(listOpts *kapi.ListOptions, ns string) (*[]*api.PodEvent, error) {
+func (nosc *NuageClusterClient) GetPods(listOpts *metav1.ListOptions, ns string) (*[]*api.PodEvent, error) {
 	if ns == "" {
 		ns = kapi.NamespaceAll
 	}
-	pods, err := nosc.kubeClient.Pods(ns).List(*listOpts)
+	pods, err := nosc.clientset.CoreV1().Pods(ns).List(*listOpts)
 	if err != nil {
 		return nil, err
 	}
@@ -269,33 +270,33 @@ func (nosc *NuageClusterClient) GetPods(listOpts *kapi.ListOptions, ns string) (
 }
 
 func (nosc *NuageClusterClient) WatchPods(receiver chan *api.PodEvent, stop chan bool) error {
-	podEventQueue := oscache.NewEventQueue(cache.MetaNamespaceKeyFunc)
-	listWatch := &cache.ListWatch{
-		ListFunc: func(rv kapi.ListOptions) (runtime.Object, error) {
-			return nosc.kubeClient.Pods(kapi.NamespaceAll).List(kapi.ListOptions{LabelSelector: labels.Everything(), FieldSelector: fields.Everything()})
-		},
-		WatchFunc: func(rv kapi.ListOptions) (watch.Interface, error) {
-			return nosc.kubeClient.Pods(kapi.NamespaceAll).Watch(kapi.ListOptions{LabelSelector: labels.Everything(), FieldSelector: fields.Everything()})
-		},
-	}
-	cache.NewReflector(listWatch, &kapi.Pod{}, podEventQueue, 0).Run()
-	for {
-		evt, obj, err := podEventQueue.Pop()
-		if err != nil {
-			return err
-		}
-		eventType := watch.EventType(evt)
-		switch eventType {
-		case watch.Added:
-			fallthrough
-		case watch.Deleted:
-			pod := obj.(*kapi.Pod)
-			receiver <- &api.PodEvent{Type: api.EventType(eventType), Name: pod.Name, Namespace: pod.Namespace, Labels: pod.Labels}
-		}
-	}
+	source := cache.NewListWatchFromClient(
+		nosc.clientset.CoreV1().RESTClient(),
+		"pods",
+		v1.NamespaceAll,
+		fields.Everything())
+
+	_, controller := cache.NewInformer(
+		source,
+		&v1.Pod{},
+		0,
+		cache.ResourceEventHandlerFuncs{
+			AddFunc: func(obj interface{}) {
+				pod := obj.(*v1.Pod)
+				receiver <- &api.PodEvent{Type: api.Added, Name: pod.Name, Namespace: pod.Namespace, Labels: pod.Labels}
+			},
+			DeleteFunc: func(obj interface{}) {
+				pod := obj.(*v1.Pod)
+				receiver <- &api.PodEvent{Type: api.Deleted, Name: pod.Name, Namespace: pod.Namespace, Labels: pod.Labels}
+			},
+		})
+	ctx, cancelFunc := context.WithCancel(context.Background())
+	defer cancelFunc()
+	controller.Run(ctx.Done())
+	return nil
 }
 
-func (nosc *NuageClusterClient) GetNetworkPolicies(listOpts *kapi.ListOptions) ([]*api.NetworkPolicyEvent, error) {
+func (nosc *NuageClusterClient) GetNetworkPolicies(listOpts *metav1.ListOptions) ([]*api.NetworkPolicyEvent, error) {
 	policiesList := make([]*api.NetworkPolicyEvent, 0)
 	var policies api.NuageNetworkPolicyList
 	err := nosc.nuageResourceClient.Get().Resource(api.NuageNetworkPolicyResourcePlural).Do().Into(&policies)
@@ -317,11 +318,11 @@ func (nosc *NuageClusterClient) WatchNetworkPolicies(receiver chan *api.NetworkP
 		kapi.NamespaceAll,
 		fields.Everything())
 
-	_, controller := framework.NewInformer(
+	_, controller := cache.NewInformer(
 		source,
 		&api.NuageNetworkPolicy{},
 		0,
-		framework.ResourceEventHandlerFuncs{
+		cache.ResourceEventHandlerFuncs{
 			AddFunc: func(obj interface{}) {
 				policy := obj.(*api.NuageNetworkPolicy)
 				receiver <- &api.NetworkPolicyEvent{Type: api.Added, Name: policy.Name, Namespace: policy.Namespace, Policy: policy.Spec, Labels: policy.Labels}
@@ -353,7 +354,7 @@ func DefaultClientTransport(rt http.RoundTripper) http.RoundTripper {
 	return transport
 }
 
-func GetNuageLabels(input *kapi.Service) map[string]string {
+func GetNuageLabels(input *v1.Service) map[string]string {
 	labels := input.Labels
 	nuageLabels := make(map[string]string)
 	for k, v := range labels {
@@ -367,17 +368,17 @@ func GetNuageLabels(input *kapi.Service) map[string]string {
 
 //CreatePolicyResource creates nuagenetworks network policy resource using k8s
 //thirdparty resources
-func createPolicyResource(clientset kclientset.Interface) error {
-	tpr := &extensions.ThirdPartyResource{
-		ObjectMeta: kapi.ObjectMeta{
+func createPolicyResource(clientset kubernetes.Interface) error {
+	tpr := &v1beta1.ThirdPartyResource{
+		ObjectMeta: metav1.ObjectMeta{
 			Name: "nuage-network-policy." + api.GroupName,
 		},
-		Versions: []extensions.APIVersion{
+		Versions: []v1beta1.APIVersion{
 			{Name: api.SchemeGroupVersion.Version},
 		},
 		Description: "NuageNetowrks ThirdPartyResource Network Policy Object",
 	}
-	_, err := clientset.Extensions().ThirdPartyResources().Create(tpr)
+	_, err := clientset.ExtensionsV1beta1().ThirdPartyResources().Create(tpr)
 	return err
 }
 
