@@ -130,6 +130,7 @@ func (rm *ResourceManager) GetPolicyGroupsForPod(podName string, podNs string) (
 			}
 		}
 	}
+	glog.Infof("List of policy groups returned = %v", pgList)
 	return &pgList, nil
 }
 
@@ -319,6 +320,13 @@ func (rm *ResourceManager) HandlePolicyEvent(pe *api.NetworkPolicyEvent) error {
 								if pods, err := rm.clusterClientCallBacks.FilterPods(&kapi.ListOptions{LabelSelector: sourcePodSelector, FieldSelector: fields.Everything()}, ""); err == nil {
 									for _, pod := range *pods {
 										if _, ok := namespaceLookup[pod.Namespace]; ok {
+											if _, ok := rm.policyNsPgMap[pod.Namespace]; !ok {
+												rm.policyNsPgMap[pod.Namespace] = make(PolicyPgMap)
+											}
+											if _, ok := rm.policyNsPgMap[pod.Namespace][pe.Name]; !ok {
+												rm.policyNsPgMap[pod.Namespace][pe.Name] = make(PgMap)
+											}
+											rm.policyNsPgMap[pod.Namespace][pe.Name][sourceSelectorStr] = api.PgInfo{PgName: pgName, PgId: pgId, Selector: *from.PodSelector}
 											podList = append(podList, pod.Name)
 										}
 									}
