@@ -76,6 +76,9 @@ func CreateNuagePGPolicy(
 
 	for _, ingressRule := range k8sNetworkPolicySpec.Ingress {
 		for _, from := range ingressRule.From {
+			if from.PodSelector == nil {
+				continue
+			}
 			var fromPG api.PgInfo
 			if sourceSelector, err := unversioned.LabelSelectorAsSelector(from.PodSelector); err == nil {
 				if fromPG, ok = policyGroupMap[sourceSelector.String()]; !ok {
