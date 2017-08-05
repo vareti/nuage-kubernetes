@@ -40,6 +40,7 @@ type NuageKubeMonConfig struct {
 	PrivilegedNamespace string           `yaml:"privilegedNamespace"`
 	ConfigFile          string           `yaml:"-"` // yaml tag `-` denotes that this cannot be supplied in yaml.
 	MasterConfig        MasterConfig     `yaml:"-"`
+	EtcdClientConfig    EtcdConfig       `yaml:"etcdClientConfig"`
 }
 
 type RestServerConfig struct {
@@ -59,6 +60,16 @@ type networkConfig struct {
 /* Fields we care about in the openshift master-config.yaml */
 type MasterConfig struct {
 	NetworkConfig networkConfig `yaml:"networkConfig"`
+}
+
+type EtcdConfig struct {
+	ServerCA           string   `yaml:"ca"`
+	ClientCertificate  string   `yaml:"certFile"`
+	ClientKey          string   `yaml:"keyFile"`
+	UrlList            []string `yaml:"urls"`
+	AutoScaleSubnets   string   `yaml:"autoScaleSubnets"`
+	ScaleUpThreshold   string   `yaml:"scaleUpThreshold"`
+	ScaleDownThreshold string   `yaml:"scaleDownThreshold"`
 }
 
 type NamespaceUpdateEvent int
